@@ -56,6 +56,7 @@
 /*        GLOBAL VARIABLES        */
 /* ****************************** */
 
+__attribute__((visibility("default")))
 char tiledb_errmsg[TILEDB_ERRMSG_MAX_LEN];
 
 
