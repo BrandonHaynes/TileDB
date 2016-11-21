@@ -1,14 +1,19 @@
+#define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION //TODO why?
+
 #include <stdint.h>
 #include <map>
 #include <string>
 #include <python2.7/Python.h>
+#include <python2.7/numpy/ndarrayobject.h>
 #include <boost/make_shared.hpp>
 #include <boost/python/import.hpp>
 #include <boost/python/module.hpp>
 #include <boost/python/class.hpp>
 #include <boost/python/tuple.hpp>
-#include <boost/python/make_constructor.hpp>
+#include <boost/python/numeric.hpp>
 #include <boost/python/def.hpp>
+#include <boost/python/make_constructor.hpp>
+#include <boost/python/suite/indexing/vector_indexing_suite.hpp>
 #include <mpich/mpi.h>
 #include "c_api.h"
 #include <vector>
@@ -187,9 +192,10 @@ public:
 	Array(const boost::shared_ptr<Context> context, const std::string& directory, const int mode,
 		  const python::object& subarray, const python::object& attributes) :
 		schema_(load_schema(context, directory)),
-	    array_(create_array(context, schema_, directory, mode, subarray, attributes, false)),
+	    array_(create_array(context, nullptr, directory, mode, subarray, attributes, false)),
 		buffers_(create_buffers(*schema_)),
-		sizes_(schema_->write_buffers_required(), DEFAULT_BUFFER_SIZE)
+		sizes_(schema_->write_buffers_required(), DEFAULT_BUFFER_SIZE),
+		mode_(mode)
 	{ }
 
 	Array(const boost::shared_ptr<Context> context, const boost::shared_ptr<Schema> schema, const std::string& directory, const int mode,
@@ -197,131 +203,97 @@ public:
 		schema_(schema),
 	    array_(create_array(context, schema, directory, mode, subarray, attributes, true)),
 		buffers_(create_buffers(*schema_)),
-		sizes_(schema_->write_buffers_required(), DEFAULT_BUFFER_SIZE)
+		sizes_(schema_->write_buffers_required(), DEFAULT_BUFFER_SIZE),
+		mode_(mode)
 	{ }
 
 	~Array()
 	{
+		for (auto i = 0; i < schema_->write_buffers_required(); i++)
+			free(buffers_[i]);
+		free(buffers_);
+
 		if (array_ && tiledb_array_finalize(array_) != TILEDB_OK)
 			throw boost::enable_current_exception(std::runtime_error(tiledb_errmsg));
 	}
 
 	const Schema& schema() const { return *schema_; }
 
+	python::numeric::array read(python::list& arrays) const
+	{
+		if (schema_->write_buffers_required() != python::len(arrays))
+			throw boost::enable_current_exception(std::runtime_error("Incorrect number of buffers provided"));
+		else
+		{
+			//TODO why is this required?
+			python::numeric::array::set_module_and_type("numpy", "ndarray");
+
+			void* buffers[schema_->write_buffers_required()];
+			size_t sizes[schema_->write_buffers_required()];
+			sizes[0] = 999;
+			for (auto i = 0; i < schema_->write_buffers_required(); i++)
+			{
+				const python::numeric::array& a = python::extract<python::numeric::array>(arrays[i]);
+				//throw boost::enable_current_exception(std::runtime_error("foo" + std::to_string(python::extract<int32_t>(a[1]))));
+
+				//auto *na = (PyArrayObject*)a.ptr(); //TODO PyArray_GETCONTIGUOUS((PyArrayObject*)a.ptr());
+				auto *na = PyArray_GETCONTIGUOUS((PyArrayObject*)a.ptr());
+				buffers[i] = PyArray_DATA(na); //TODO the cast shouldn't be required; if required use c++ cast
+				sizes[i] = PyArray_NBYTES(na); // PyArray_MultiplyList(new npy_intp[3]{ 3, 3, 0 }, 1);
+			}
+
+			if (tiledb_array_read(array_, buffers, sizes) != TILEDB_OK)
+				throw boost::enable_current_exception(std::runtime_error(tiledb_errmsg));
+			//else
+			///*return */ bool overflow = tiledb_array_overflow(array_, 0);
+
+			npy_intp dims[1]{ (npy_intp)schema_->write_buffers_required() }; //TODO fix cast
+			auto arr = PyArray_Return((PyArrayObject*)PyArray_SimpleNewFromData(1, dims, NPY_UINT64, sizes)); //TODO fix cast
+
+			boost::python::handle<> handle(arr);
+			boost::python::numeric::array farr(handle);
+			return farr;
+
+
+			//npy_intp dims[1]{ (npy_intp)schema_->write_buffers_required() }; //TODO fix cast
+			//return PyArray_Return((PyArrayObject*)PyArray_SimpleNewFromData(1, dims, NPY_UINT32, sizes)); //TODO fix cast
+			//return PyArray_Return(output = PyArray_FromDims(3, sizes, PyArray_LONG));
+		}
+	}
+
+	//TODO optimize for ndarrays
 	void write(python::list& values) const
 	{
 		auto count = schema_->write_buffers_required();
-		const void *buffers[count];
 		size_t sizes[count];
+		void **buffers;
 
-		assert(count == python::len(values));
+		if(schema_->handle()->attribute_num_ != python::len(values))
+			throw boost::enable_current_exception(std::runtime_error("Incorrect number of attribute lists provided"));
+		else if (mode_ == TILEDB_ARRAY_WRITE)
+			buffers = append(sizes, values);
+		else if (mode_ == TILEDB_ARRAY_WRITE_UNSORTED)
+			buffers = write_unsorted(sizes, values);
+		else
+			throw boost::enable_current_exception(std::runtime_error("Unsupported write mode."));
 
-		//for (auto i = 0; i < python::len(values); i++)
-		//{
-		//		auto type = schema_->handle()->types_[i];
-		//		auto length = python::len(values[i]);
-		//		sizes[i] = length * attribute_sizes.at(type);
-		//		auto *current = new char[sizes[i]];
-		//		buffers[i] = current;
-		//		for (auto j = 0; j < length; j++)
-		//			extent_extractors.at(type)(&current, values[i][j]); // rename extent_extractors
-		//																//todo free
-		//}
-
-		for (auto i = 0, j = 0; i < python::len(values); i++, j++)
-			if (schema_->handle()->cell_val_num_[i] == TILEDB_VAR_NUM)
-				copy_variable_buffer(&j, schema_->handle()->types_[j], &buffers[j], &sizes[j], values[i]);
-			else
-				copy_fixed_buffer(j, schema_->handle()->types_[j], &buffers[j], &sizes[j], values[i]);
-
-		//{
-		//	if(schema_->handle()->cell_val_num_[i] == TILEDB_VAR_NUM)
-		//	{
-		//		auto type = schema_->handle()->types_[i];
-		//		auto length = python::len(values[i]);
-		//		sizes[i] = length * attribute_sizes.at(type);
-		//		auto *current = new char[sizes[i]];
-		//		buffers[i] = current;
-		//		for (auto j = 0; j < length; j++)
-		//			extent_extractors.at(type)(&current, values[i][j]); // rename extent_extractors
-		//																//todo free
-		//	} 
-		//	else
-		//	{
-		//		auto type = schema_->handle()->types_[i];
-		//		auto length = python::len(values[i]);
-		//		sizes[i] = length * attribute_sizes.at(type);
-		//		auto *current = new char[sizes[i]];
-		//		buffers[i] = current;
-		//		for (auto j = 0; j < length; j++)
-		//			extent_extractors.at(type)(&current, values[i][j]); // rename extent_extractors
-		//																//todo free
-		//	}
-		//}
-
-
-		//auto i = reinterpret_cast<const int*>(buffers[0])[0];
-		//throw boost::enable_current_exception(std::runtime_error("foo" + std::to_string(i)));
-
-		//throw boost::enable_current_exception(std::runtime_error("foo" + std::to_string(sizes[3])));
-
-		//std::string x("");
-		//for (int i = 0; i < schema_->write_buffers_required(); i++)
-		//{
-		//	x += "Buffer " + std::to_string(i) + " size " + std::to_string(sizes[i]) + "\n";
-		//	for (int j = 0; j < sizes[i] / sizeof(int32_t) && j < 100; j++)
-		//		x += std::to_string(reinterpret_cast<int32_t*>(buffers_[i])[j]) + ":";
-		//	x += "\n";
-		//}
-
-		//throw boost::enable_current_exception(std::runtime_error("buffers\n" + x));
-
-		if (tiledb_array_write(array_, const_cast<const void**>(buffers_), sizes) != TILEDB_OK)
+		if (tiledb_array_write(array_, const_cast<const void**>(buffers_), sizes) != TILEDB_OK) //TODO const_cast
 			throw boost::enable_current_exception(std::runtime_error(tiledb_errmsg));
-	}
 
-	//todo make private
-	//todo no longer using buffers parameter
-	void copy_fixed_buffer(const size_t index, const int type, const void** buffer, size_t *sizes, const python::object& values) const
-	{
-		auto length = python::len(values);
-		*sizes = length * attribute_sizes.at(type);
-		auto *current = get_buffer(index, *sizes);
-		//auto *current = new char[*sizes];
-		//*buffer = current;
-		//throw boost::enable_current_exception(std::runtime_error("qwer" + std::to_string(*reinterpret_cast<int32_t*>(buffers_[0]))));
-		for (auto j = 0; j < length; j++)
-			extent_extractors.at(type)(&current, values[j]); // rename extent_extractors
-																//todo free
-	}
+		//auto count = schema_->write_buffers_required();
+		//const void *buffers[count];
+		//size_t sizes[count];
 
-	//TODO make these static again 
-	//todo no longer using buffers parameter
-	void copy_variable_buffer(int *index, const int type, const void** buffer, size_t *sizes, const python::object& values) const
-	{
-		auto length = python::len(values);
-		sizes[0] = length * attribute_sizes.at(TILEDB_INT32);
-		//auto *offest = new int32_t[sizes[0]];
-		auto *offset = get_buffer<int32_t*>(*index, sizes[0]);
-		buffer[0] = offset;
+		//assert(count == python::len(values));
 
-		auto total_length = 0;
-		for (auto i = 0; i < length; i++) {
-			auto current_length = python::len(values[i]);
-			*offset++ = total_length * attribute_sizes.at(type);
-			total_length += current_length;
-		}
+		//for (auto i = 0, j = 0; i < python::len(values); i++, j++)
+		//	if (schema_->handle()->cell_val_num_[i] == TILEDB_VAR_NUM)
+		//		copy_variable_buffer(&j, schema_->handle()->types_[j], &sizes[j], values[i]);
+		//	else
+		//		copy_fixed_buffer(j, schema_->handle()->types_[j], &sizes[j], values[i]);
 
-		sizes[1] = total_length * attribute_sizes.at(type);
-		//auto current = new char[sizes[1]];
-		auto *current = get_buffer(*index + 1, sizes[1]);
-		buffer[1] = current;
-
-		for (auto i = 0; i < length; i++)
-			for (auto j = 0; j < python::len(values[i]); j++)
-				extent_extractors.at(type)(&current, values[i][j]); // rename extent_extractors
-
-		++*index; //TODO
+		//if (tiledb_array_write(array_, const_cast<const void**>(buffers_), sizes) != TILEDB_OK)
+		//	throw boost::enable_current_exception(std::runtime_error(tiledb_errmsg));
 	}
 
 	void consolidate() const
@@ -351,10 +323,67 @@ private:
 
 		if (create && tiledb_array_create(context->handle(), schema->handle()) != TILEDB_OK)
 			throw boost::enable_current_exception(std::runtime_error(tiledb_errmsg));
+		//TODO expose attributes parameter
 		else if(tiledb_array_init(context->handle(), &array_, directory.c_str(), mode, subarray_, attributes_, 0) != TILEDB_OK)
 			throw boost::enable_current_exception(std::runtime_error(tiledb_errmsg));
 		//array_(tiledb_array_create(context.handle(), schema.handle())) { }
 		return array_;
+	}
+
+	void** append(size_t *sizes, python::list& values) const
+	{
+		for (auto i = 0, j = 0; i < python::len(values); i++, j++)
+			if (schema_->handle()->cell_val_num_[i] == TILEDB_VAR_NUM)
+				copy_variable_buffer(&j, schema_->handle()->types_[j], &sizes[j], values[i]);
+			else
+				copy_fixed_buffer(j, schema_->handle()->types_[j], &sizes[j], values[i]);
+
+		return buffers_;
+	}
+
+	void** write_unsorted(size_t *sizes, python::list& values) const
+	{
+		throw boost::enable_current_exception(std::runtime_error("Not implemented."));
+	}
+
+	void copy_fixed_buffer(const size_t index, const int type, size_t *sizes, const python::object& values) const
+	{
+		auto length = python::len(values);
+		*sizes = length * attribute_sizes.at(type);
+		auto *current = get_buffer(index, *sizes);
+		//auto *current = new char[*sizes];
+		//*buffer = current;
+		//throw boost::enable_current_exception(std::runtime_error("qwer" + std::to_string(*reinterpret_cast<int32_t*>(buffers_[0]))));
+		for (auto j = 0; j < length; j++)
+			extent_extractors.at(type)(&current, values[j]); // rename extent_extractors
+															 //todo free
+	}
+
+	void copy_variable_buffer(int *index, const int type, size_t *sizes, const python::object& values) const
+	{
+		auto length = python::len(values);
+		sizes[0] = length * attribute_sizes.at(TILEDB_INT32);
+		//auto *offest = new int32_t[sizes[0]];
+		auto *offset = get_buffer<int32_t*>(*index, sizes[0]);
+		//buffer[0] = offset;
+
+		auto total_length = 0;
+		for (auto i = 0; i < length; i++) {
+			auto current_length = python::len(values[i]);
+			*offset++ = total_length * attribute_sizes.at(type);
+			total_length += current_length;
+		}
+
+		sizes[1] = total_length * attribute_sizes.at(type);
+		//auto current = new char[sizes[1]];
+		auto *current = get_buffer(*index + 1, sizes[1]);
+		//buffer[1] = current;
+
+		for (auto i = 0; i < length; i++)
+			for (auto j = 0; j < python::len(values[i]); j++)
+				extent_extractors.at(type)(&current, values[i][j]); //TODO rename extent_extractors
+
+		++*index; //TODO
 	}
 
 	static void** create_buffers(Schema& schema)
@@ -379,8 +408,10 @@ private:
 	boost::shared_ptr<Context> context_;
 	boost::shared_ptr<Schema> schema_;
 	TileDB_Array* array_ = nullptr;
+	//TODO use vectors instead with a custom boost::python::extract converter
 	mutable void **buffers_;
 	const std::vector<size_t> sizes_;
+	const int mode_;
 };
 
 static boost::shared_ptr<TileDB_Config> make_configuration(const char* home, boost::python::object communicator,
@@ -479,7 +510,9 @@ static boost::shared_ptr<Array> make_array_load(const boost::shared_ptr<Context>
 
 BOOST_PYTHON_MODULE(core)
 {
-    python::class_<TileDB_Config>("Configuration", python::no_init)
+	import_array(); //TODO move elsewhere?
+
+	python::class_<TileDB_Config>("Configuration", python::no_init)
         .def("__init__", make_constructor(make_configuration))
     	.def_readonly("home", &TileDB_Config::home_)
     	.def_readwrite("communicator", &TileDB_Config::mpi_comm_)
@@ -512,5 +545,6 @@ BOOST_PYTHON_MODULE(core)
 	python::class_<Array>("Array", python::no_init)
 		.def("__init__", make_constructor(make_array))
 		.def("__init__", make_constructor(make_array_load))
-		.def("write", &Array::write);
+		.def("write", &Array::write)
+		.def("read", &Array::read);
 }
