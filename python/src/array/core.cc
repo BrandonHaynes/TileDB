@@ -1,9 +1,19 @@
-#define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION //TODO why?
 
-#include <stdint.h>
+#ifdef _MSC_VER
+#define __x86_64__
+typedef int npy_int32;
+typedef short npy_int16;
+typedef unsigned int npy_uint16;
+#define _SYS_STAT_H
+#define _SYS_TYPES_H
+#endif
+
+//#include <stdint.h>
 #include <map>
-#include <string>
+#include <vector>
+
 #include <python2.7/Python.h>
+#define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <python2.7/numpy/ndarrayobject.h>
 #include <boost/make_shared.hpp>
 #include <boost/python/import.hpp>
@@ -15,8 +25,8 @@
 #include <boost/python/make_constructor.hpp>
 #include <boost/python/suite/indexing/vector_indexing_suite.hpp>
 #include <mpich/mpi.h>
+
 #include "c_api.h"
-#include <vector>
 
 namespace python = boost::python;
 
@@ -120,6 +130,17 @@ public:
 	}
 
 private:
+	template<typename T>
+	static python::tuple next_tuple(char** data) { return python::make_tuple(next_value<T>(data), next_value<T>(data)); }
+
+	template<typename T>
+	static python::object next_value(char** data)
+	{
+		python::object object(*reinterpret_cast<T*>(*data));
+		*data += sizeof(T);
+		return object;
+	}
+
 	const std::map<int, std::function<python::object(char**)>> domain_factory_ =
 	{
 		{ TILEDB_INT32,   next_tuple<int32_t> },
@@ -135,16 +156,6 @@ private:
 		{ TILEDB_FLOAT64, next_value<double> },
 	};
 
-	template<typename T>
-	static python::object next_value(char** data)
-	{
-		python::object object(*reinterpret_cast<T*>(*data));
-		*data += sizeof(T);
-		return object;
-	}
-	template<typename T>
-	static python::tuple next_tuple(char** data)  { return python::make_tuple(next_value<T>(data), next_value<T>(data)); }
-
 	TileDB_ArraySchema schema_;
 	const size_t variable_attributes_;
 };
@@ -154,12 +165,18 @@ public:
 	explicit Context(TileDB_CTX* context) : context_(context) {}
 	~Context()
 	{
-		//TODO throwing in a destructor?
-		if (context_ && tiledb_ctx_finalize(context_) != TILEDB_OK)
-			throw boost::enable_current_exception(std::runtime_error(tiledb_errmsg));
+		try { close(); }
+		catch(...) {	}
 	}
 
 	TileDB_CTX* handle() const { return context_; }
+
+	void close()
+	{
+		if (context_ && tiledb_ctx_finalize(context_) != TILEDB_OK)
+			throw boost::enable_current_exception(std::runtime_error(tiledb_errmsg));
+		context_ = nullptr;
+	}
 
 	void create_workspace(const char* name) const
 	{
@@ -225,73 +242,66 @@ public:
 			throw boost::enable_current_exception(std::runtime_error("Incorrect number of buffers provided"));
 		else
 		{
-			//TODO why is this required?
-			python::numeric::array::set_module_and_type("numpy", "ndarray");
-
-			void* buffers[schema_->write_buffers_required()];
-			size_t sizes[schema_->write_buffers_required()];
+			std::vector<void*> buffers(schema_->write_buffers_required());
+			//void* buffers[schema_->write_buffers_required()];
+			//size_t sizes[schema_->write_buffers_required()];
+			std::vector<size_t> sizes(schema_->write_buffers_required());
 			sizes[0] = 999;
 			for (auto i = 0; i < schema_->write_buffers_required(); i++)
 			{
 				const python::numeric::array& a = python::extract<python::numeric::array>(arrays[i]);
-				//throw boost::enable_current_exception(std::runtime_error("foo" + std::to_string(python::extract<int32_t>(a[1]))));
 
-				//auto *na = (PyArrayObject*)a.ptr(); //TODO PyArray_GETCONTIGUOUS((PyArrayObject*)a.ptr());
 				auto *na = PyArray_GETCONTIGUOUS((PyArrayObject*)a.ptr());
-				buffers[i] = PyArray_DATA(na); //TODO the cast shouldn't be required; if required use c++ cast
-				sizes[i] = PyArray_NBYTES(na); // PyArray_MultiplyList(new npy_intp[3]{ 3, 3, 0 }, 1);
+				buffers[i] = PyArray_DATA(na); 
+				sizes[i] = PyArray_NBYTES(na); 
 			}
 
-			if (tiledb_array_read(array_, buffers, sizes) != TILEDB_OK)
+			if (tiledb_array_read(array_, buffers.data(), sizes.data()) != TILEDB_OK)
 				throw boost::enable_current_exception(std::runtime_error(tiledb_errmsg));
 			//else
 			///*return */ bool overflow = tiledb_array_overflow(array_, 0);
 
-			npy_intp dims[1]{ (npy_intp)schema_->write_buffers_required() }; //TODO fix cast
-			auto arr = PyArray_Return((PyArrayObject*)PyArray_SimpleNewFromData(1, dims, NPY_UINT64, sizes)); //TODO fix cast
+			npy_intp dims[1]{ static_cast<npy_intp>(schema_->write_buffers_required()) };
+			auto arr = PyArray_Return(reinterpret_cast<PyArrayObject*>(PyArray_SimpleNewFromData(1, dims, NPY_UINT64, sizes.data())));
 
 			boost::python::handle<> handle(arr);
 			boost::python::numeric::array farr(handle);
 			return farr;
-
-
-			//npy_intp dims[1]{ (npy_intp)schema_->write_buffers_required() }; //TODO fix cast
-			//return PyArray_Return((PyArrayObject*)PyArray_SimpleNewFromData(1, dims, NPY_UINT32, sizes)); //TODO fix cast
-			//return PyArray_Return(output = PyArray_FromDims(3, sizes, PyArray_LONG));
 		}
 	}
 
 	//TODO optimize for ndarrays
 	void write(python::list& values) const
 	{
-		auto count = schema_->write_buffers_required();
-		size_t sizes[count];
-		void **buffers;
+		//auto count = schema_->write_buffers_required();
+		std::vector<size_t> sizes(schema_->write_buffers_required());
+		//size_t sizes[schema_->write_buffers_required()];
+		//void **buffers;
 
 		if(schema_->handle()->attribute_num_ != python::len(values))
 			throw boost::enable_current_exception(std::runtime_error("Incorrect number of attribute lists provided"));
 		else if (mode_ == TILEDB_ARRAY_WRITE)
-			buffers = append(sizes, values);
+			append(sizes, values);
 		else if (mode_ == TILEDB_ARRAY_WRITE_UNSORTED)
-			buffers = write_unsorted(sizes, values);
+			write_unsorted(sizes, values);
 		else
 			throw boost::enable_current_exception(std::runtime_error("Unsupported write mode."));
 
-		if (tiledb_array_write(array_, const_cast<const void**>(buffers_), sizes) != TILEDB_OK) //TODO const_cast
+		if (tiledb_array_write(array_, const_cast<const void**>(buffers_), sizes.data()) != TILEDB_OK) //TODO const_cast
 			throw boost::enable_current_exception(std::runtime_error(tiledb_errmsg));
 
 		//auto count = schema_->write_buffers_required();
 		//const void *buffers[count];
 		//size_t sizes[count];
-
+		//
 		//assert(count == python::len(values));
-
+		//
 		//for (auto i = 0, j = 0; i < python::len(values); i++, j++)
 		//	if (schema_->handle()->cell_val_num_[i] == TILEDB_VAR_NUM)
 		//		copy_variable_buffer(&j, schema_->handle()->types_[j], &sizes[j], values[i]);
 		//	else
 		//		copy_fixed_buffer(j, schema_->handle()->types_[j], &sizes[j], values[i]);
-
+		//
 		//if (tiledb_array_write(array_, const_cast<const void**>(buffers_), sizes) != TILEDB_OK)
 		//	throw boost::enable_current_exception(std::runtime_error(tiledb_errmsg));
 	}
@@ -316,7 +326,6 @@ private:
 	static TileDB_Array* create_array(const boost::shared_ptr<Context> context, const boost::shared_ptr<Schema> schema, const std::string& directory, const int mode,
 									  const python::object& subarray, const python::object& attributes, const bool create)
 	{
-		//TODO throwing in a constructor?
 		TileDB_Array* array_;
 		void* subarray_ = nullptr;
 		const char** attributes_ = nullptr;
@@ -330,7 +339,7 @@ private:
 		return array_;
 	}
 
-	void** append(size_t *sizes, python::list& values) const
+	void** append(std::vector<size_t>& sizes, python::list& values) const
 	{
 		for (auto i = 0, j = 0; i < python::len(values); i++, j++)
 			if (schema_->handle()->cell_val_num_[i] == TILEDB_VAR_NUM)
@@ -341,7 +350,7 @@ private:
 		return buffers_;
 	}
 
-	void** write_unsorted(size_t *sizes, python::list& values) const
+	static void** write_unsorted(const std::vector<size_t>& sizes, python::list& values) //const
 	{
 		throw boost::enable_current_exception(std::runtime_error("Not implemented."));
 	}
@@ -406,7 +415,7 @@ private:
 	}
 
 	boost::shared_ptr<Context> context_;
-	boost::shared_ptr<Schema> schema_;
+	const boost::shared_ptr<Schema> schema_;
 	TileDB_Array* array_ = nullptr;
 	//TODO use vectors instead with a custom boost::python::extract converter
 	mutable void **buffers_;
@@ -417,14 +426,9 @@ private:
 static boost::shared_ptr<TileDB_Config> make_configuration(const char* home, boost::python::object communicator,
 														   int read_method, int write_method)
 {
-    MPI_Comm* comm;
-
-    //TODO switch ternary operator
-    if(communicator.is_none())
-    	comm = nullptr;
-    else
-    	//TODO test this
-    	comm = python::extract<MPI_Comm*>(python::import("mpi4py.MPI").attr("_addressof")(communicator));
+	auto* comm = communicator.is_none() 
+		? nullptr 
+		: static_cast<MPI_Comm*>(python::extract<MPI_Comm*>(python::import("mpi4py.MPI").attr("_addressof")(communicator)));
 
 	return boost::make_shared<TileDB_Config>(TileDB_Config{home, comm, read_method, write_method});
 }
@@ -436,7 +440,7 @@ static boost::shared_ptr<Context> make_context(TileDB_Config* configuration)
     if(tiledb_ctx_init(&context, configuration) == TILEDB_OK)
     	return boost::make_shared<Context>(context);
     else
-    	PyErr_SetString(PyExc_RuntimeError, "tiledb_ctx_init returned TILEDB_ERR");
+		throw boost::enable_current_exception(std::runtime_error("tiledb_ctx_init returned TILEDB_ERR"));
 }
 
 //TODO accept none for cell_Value_num and other applicable fields
@@ -450,13 +454,20 @@ static boost::shared_ptr<Schema> make_schema(const std::string& array_name,
 {
 	//auto* schema = new TileDB_ArraySchema();
 	TileDB_ArraySchema schema;
-	const char* attributes_[python::len(attributes)];
-	int cell_val_num_[python::len(cell_val_num)];
-	int compression_[python::len(compression)];
-	const char* dimensions_[python::len(dimensions)];
-	int types_[python::len(types)];
-	int64_t domain_[python::len(domain)];
-	int64_t tile_extents_[python::len(tile_extents)];
+	std::vector<const char*> attributes_(python::len(attributes));
+	//const char* attributes_[python::len(attributes)];
+	std::vector<int> cell_val_num_(python::len(cell_val_num));
+	//int cell_val_num_[python::len(cell_val_num)];
+	std::vector<int> compression_(python::len(compression));
+	//int compression_[python::len(compression)];
+	std::vector<const char*> dimensions_(python::len(dimensions));
+	//const char* dimensions_[python::len(dimensions)];
+	std::vector<int> types_(python::len(types));
+	//int types_[python::len(types)];
+	std::vector<int64_t> domain_(python::len(domain));
+	//int64_t domain_[python::len(domain)];
+	std::vector<int64_t> tile_extents_(python::len(tile_extents));
+	//int64_t tile_extents_[python::len(tile_extents)];
 	int coordinate_type = python::extract<int32_t>(types[python::len(types) - 1]);
 
 	for(auto i = 0; i < python::len(attributes); i++)
@@ -474,43 +485,42 @@ static boost::shared_ptr<Schema> make_schema(const std::string& array_name,
 	for(auto i = 0; i < python::len(types); i++)
 		types_[i] = python::extract<int>(types[i]);
 
-	char* current_domain = reinterpret_cast<char*>(domain_);
+	char* current_domain = reinterpret_cast<char*>(domain_.data());
 	for(auto i = 0; i < python::len(domain); i++)
 		domain_extractors.at(coordinate_type)(&current_domain, domain[i]);
 
-	char* current_extent = reinterpret_cast<char*>(tile_extents_);
+	char* current_extent = reinterpret_cast<char*>(tile_extents_.data());
 	for (auto i = 0; i < python::len(tile_extents); i++)
 		extent_extractors.at(coordinate_type)(&current_extent, tile_extents[i]);
 
-	if(tiledb_array_set_schema(&schema, array_name.c_str(), attributes_, python::len(attributes), capacity, cell_order, 
-		cell_val_num_, compression_, dense, dimensions_, python::len(dimensions), domain_, current_domain - reinterpret_cast<char*>(domain_),
-		tile_extents_, current_extent - reinterpret_cast<char*>(tile_extents_), tile_order, types_) != TILEDB_OK)
-    	PyErr_SetString(PyExc_RuntimeError, "tiledb_array_set_schema returned TILEDB_ERR");
-    else
+	if(tiledb_array_set_schema(&schema, array_name.c_str(), attributes_.data(), python::len(attributes), capacity, cell_order, 
+		cell_val_num_.data(), compression_.data(), dense, dimensions_.data(), python::len(dimensions), domain_.data(), current_domain - reinterpret_cast<char*>(domain_.data()),
+		tile_extents_.data(), current_extent - reinterpret_cast<char*>(tile_extents_.data()), tile_order, types_.data()) != TILEDB_OK)
+		throw boost::enable_current_exception(std::runtime_error("tiledb_array_set_schema returned TILEDB_ERR"));
+	else
 		return boost::make_shared<Schema>(schema);
 }
 
 
-//TODO constify
 //TODO create overloads; see BOOST_PYTHON_FUNCTION_OVERLOADS
-static boost::shared_ptr<Array> make_array(const boost::shared_ptr<Context> context, const boost::shared_ptr<Schema> schema, const std::string& directory, const int mode,
+static std::shared_ptr<Array> make_array(const boost::shared_ptr<Context> context, const boost::shared_ptr<Schema> schema, const std::string& directory, const int mode,
 	                                       const python::object& subarray, const python::object& attributes)
 {
-	return boost::make_shared<Array>(context, schema, directory, mode, subarray, attributes);
+	return std::make_shared<Array>(context, schema, directory, mode, subarray, attributes);
 }
 
 
-//TODO constify
-static boost::shared_ptr<Array> make_array_load(const boost::shared_ptr<Context> context, const std::string& directory, const int mode,
+static std::shared_ptr<Array> make_array_load(const boost::shared_ptr<Context> context, const std::string& directory, const int mode,
 	const python::object& subarray, const python::object& attributes)
 {
-	return boost::make_shared<Array>(context, directory, mode, subarray, attributes);
+	return std::make_shared<Array>(context, directory, mode, subarray, attributes);
 }
 
 
 BOOST_PYTHON_MODULE(core)
 {
-	import_array(); //TODO move elsewhere?
+	import_array();
+	python::numeric::array::set_module_and_type("numpy", "ndarray");
 
 	python::class_<TileDB_Config>("Configuration", python::no_init)
         .def("__init__", make_constructor(make_configuration))
