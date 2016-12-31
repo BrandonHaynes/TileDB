@@ -137,7 +137,8 @@ CORE_SRC := $(wildcard $(foreach D,$(CORE_SRC_SUBDIRS),$D/*.cc))
 CORE_OBJ := $(patsubst $(CORE_SRC_DIR)/%.cc, $(CORE_OBJ_DIR)/%.o, $(CORE_SRC))
 PYTHON_SRC := $(wildcard $(foreach D,$(PYTHON_SRC_SUBDIRS),$D/*.cc))
 PYTHON_OBJ := $(patsubst $(PYTHON_SRC_DIR)/%.cc, $(PYTHON_OBJ_DIR)/%.o, $(PYTHON_SRC))
-PYTHON_LIB := $(patsubst $(PYTHON_SRC_DIR)/%.cc, $(PYTHON_LIB_DIR)/%.$(SHLIB_EXT), $(PYTHON_SRC))
+#PYTHON_LIB := $(patsubst $(PYTHON_SRC_DIR)/%.cc, $(PYTHON_LIB_DIR)/%.$(SHLIB_EXT), $(PYTHON_SRC))
+PYTHON_LIB := $(PYTHON_LIB_DIR)/tiledb.$(SHLIB_EXT)
 EXAMPLES_INCLUDE := $(wildcard $(EXAMPLES_INCLUDE_DIR)/*.h)
 EXAMPLES_SRC := $(wildcard $(EXAMPLES_SRC_DIR)/*.cc)
 EXAMPLES_OBJ := $(patsubst $(EXAMPLES_SRC_DIR)/%.cc,\
@@ -158,7 +159,8 @@ all: core libtiledb
 
 core: $(CORE_OBJ) 
 
-python: $(PYTHON_OBJ) $(PYTHON_LIB)
+python: $(PYTHON_LIB)
+#python: $(PYTHON_OBJ) $(PYTHON_LIB)
 
 libtiledb: core $(CORE_LIB_DIR)/libtiledb.$(SHLIB_EXT) \
                 $(CORE_LIB_DIR)/libtiledb.a
@@ -244,16 +246,16 @@ clean_libtiledb:
 $(PYTHON_OBJ_DIR)/%.o: $(PYTHON_SRC_DIR)/%.cc
 	@mkdir -p $(dir $@) 
 	@echo "Compiling $<"
-	@$(CXX) $(CPPFLAGS) $(INCLUDE_PATHS) $(CORE_INCLUDE_PATHS) $(PYTHON_INCLUDE_PATHS) -c $< -o $@ 
-	@$(CXX) -MM $(CORE_INCLUDE_PATHS) $(PYTHON_INCLUDE_PATHS) $(INCLUDE_PATHS) $< > $(@:.o=.d)
+	@$(CXX) $(CPPFLAGS) $(INCLUDE_PATHS) $(PYTHON_INCLUDE_PATHS) $(CORE_INCLUDE_PATHS) -c $< -o $@ 
+	@$(CXX) -MM $(PYTHON_INCLUDE_PATHS) $(CORE_INCLUDE_PATHS) $(INCLUDE_PATHS) $< > $(@:.o=.d)
 	@mv -f $(@:.o=.d) $(@:.o=.d.tmp)
 	@sed 's|.*:|$@:|' < $(@:.o=.d.tmp) > $(@:.o=.d)
 	@rm -f $(@:.o=.d.tmp)
 
-$(PYTHON_LIB_DIR)/%.$(SHLIB_EXT): $(PYTHON_OBJ_DIR)/%.o
+$(PYTHON_LIB): $(PYTHON_OBJ)
 	@mkdir -p $(dir $@)
-	@echo "Creating dynamic library $@"
-	@$(CXX) $(SHLIB_FLAGS) -o $@ $^ $(LIBRARY_PATHS) $(PYTHONLIB) $(MPILIB) $(OPENSSLLIB)
+	@echo "Creating dynamic library tiledb.$(SHLIB_EXT) $^"
+	@$(CXX) $(SHLIB_FLAGS) -o $@ $^ $(LIBRARY_PATHS) $(PYTHONLIB) $(MPILIB) $(ZLIB) $(OPENSSLLIB) $(OPENMP_FLAG)
 	@touch $(dir $@)/__init__.py
 
 # --- Cleaning --- #
