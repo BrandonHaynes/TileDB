@@ -10,8 +10,6 @@
 #include "c_api.h"
 
 class Schema {
-	//friend class Context;
-
 public:
 	//TODO accept none for cell_Value_num and other applicable fields
 	static std::shared_ptr<Schema> create(const std::string& array_name,
