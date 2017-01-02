@@ -15,12 +15,12 @@ class Schema {
 public:
 	//TODO accept none for cell_Value_num and other applicable fields
 	static std::shared_ptr<Schema> create(const std::string& array_name,
-		const boost::python::list& attributes, const long capacity,
-		const int cell_order, const boost::python::list& cell_val_num,
-		const boost::python::list& compression, const int dense,
-		const boost::python::list& dimensions, const boost::python::list& domain,
-		const boost::python::list& tile_extents, const int tile_order,
-		const boost::python::list& types);
+		const boost::python::object& attributes, const long capacity,
+		const int cell_order, const boost::python::object& cell_val_num,
+		const boost::python::object& compression, const int dense,
+		const boost::python::object& dimensions, const boost::python::object& domain,
+		const boost::python::object& tile_extents, const int tile_order,
+		const boost::python::object& types);
 
 	explicit Schema(TileDB_ArraySchema& schema) :
 		schema_(schema),

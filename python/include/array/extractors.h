@@ -7,7 +7,7 @@
 #include <boost/python/object.hpp>
 
 extern const std::map<const int, const size_t> attribute_sizes;
-extern const std::map<const int, const std::function<void(char**, boost::python::object)>> domain_extractors;
-extern const std::map<const int, const std::function<void(char**, boost::python::object)>> extent_extractors;
+extern const std::map<const int, const std::function<char**(char**, boost::python::object)>> domain_extractors;
+extern const std::map<const int, const std::function<char**(char**, boost::python::object)>> extent_extractors;
 
 #endif

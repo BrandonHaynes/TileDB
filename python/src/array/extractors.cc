@@ -5,20 +5,22 @@
 #include "c_api.h"
 
 template<typename T>
-static void extract_value(char** current, boost::python::object value)
+static char** extract_value(char** current, boost::python::object value)
 {
 	*reinterpret_cast<T*>(*current) = boost::python::extract<T>(value);
 	*current += sizeof(T);
+	return current;
 }
 
 template<typename T, size_t Limit>
-static void extract_indexable(char** current, boost::python::object value)
+static char** extract_indexable(char** current, boost::python::object value)
 {
 	for (auto i = 0; i < boost::python::len(value) && i < Limit; i++)
 		extract_value<T>(current, value[i]);
+	return current;
 }
 
-const std::map<const int, const std::function<void(char**, boost::python::object)>> domain_extractors =
+const std::map<const int, const std::function<char**(char**, boost::python::object)>> domain_extractors =
 {
 	{ TILEDB_INT32,   extract_indexable<int32_t, 2> },
 	{ TILEDB_INT64,   extract_indexable<int64_t, 2> },
@@ -26,7 +28,7 @@ const std::map<const int, const std::function<void(char**, boost::python::object
 	{ TILEDB_FLOAT64, extract_indexable<double, 2> },
 };
 
-const std::map<const int, const std::function<void(char**, boost::python::object)>> extent_extractors =
+const std::map<const int, const std::function<char**(char**, boost::python::object)>> extent_extractors =
 {
 	{ TILEDB_INT32,   extract_value<int32_t> },
 	{ TILEDB_INT64,   extract_value<int64_t> },
